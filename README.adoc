@@ -246,6 +246,8 @@ Add eks-spinnaker cluster as a Kubernetes provider:
 
 hal config provider kubernetes account add eks-spinnaker --context $CONTEXT
 
+----
+
 == 7. Enable artifact support and configure env to install spinnaker
 
 ----
