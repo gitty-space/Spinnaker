@@ -1,0 +1,352 @@
+:doctype: book
+
+= Prerequisites to Install spinnaker on eks
+
+1) A machine on which to install Halyard
+
+   It can be a local machine or VM or any docker container which contains atleast 8 GB memory
+
+2) A kubernetes cluster on which to install spinnaker 
+   
+   Recommends atleast 4 cores and 16GB of RAM available in the cluster.
+
+please refer to the main
+Spinnaker site and https://www.spinnaker.io/setup/[Installation] guide.
+
+If you want more information on how Spinnaker is designed, see the https://www.spinnaker.io/concepts/[Documentation Overview].
+
+= Installation process
+
+1. Install Halyard on local machine
+2. Choose a cloud provider to setup kubernetes cluster
+3. Choose an environment 
+4. Choose a storage service 
+5. Finally deploy spinnaker
+
+== Install basic tools to configure and install spinnaker,eks
+
+----
+aws cli, eksctl, kubectl, aws-iam-authenticator, docker
+----
+ 
+
+[source,bash]
+----
+# Download and install kubectl
+curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
+chmod +x ./kubectl
+sudo mv ./kubectl /usr/local/bin/kubectl
+
+# Verify the installation of kubectl
+kubectl help
+
+# Download and install aws-iam-authenticator
+curl -o aws-iam-authenticator https://amazon-eks.s3-us-west-2.amazonaws.com/1.13.7/2019-06-11/bin/linux/amd64/aws-iam-authenticator
+chmod +x ./aws-iam-authenticator
+mkdir -p $HOME/bin && cp ./aws-iam-authenticator $HOME/bin/aws-iam-authenticator && export PATH=$HOME/bin:$PATH
+echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc
+
+#Verify the installation of aws-iam-authenticator
+aws-iam-authenticator help
+
+# Install the awscli
+sudo apt install python-pip awscli
+
+# Verify the installation
+aws --version
+
+
+# Docker installation on centos/RHEL VM
+sudo yum update -y
+curl -fsSL https://get.docker.com | sh;
+sudo service docker start
+sudo systemctl enable docker
+Reconnect to the VM
+
+# Docker installation on Amazon ec2 instance
+sudo yum update -y
+sudo amazon-linux-extras install docker
+sudo yum install docker
+sudo service docker start
+sudo systemctl enable docker
+sudo usermod -a -G docker ec2-use
+Reconnect to the VM
+
+# Download and configure eksctl
+curl --silent --location "https://github.com/weaveworks/eksctl/releases/download/latest_release/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+
+sudo mv /tmp/eksctl /usr/local/bin
+
+# Verify the installation
+eksctl help
+----
+
+=== 1. Install Halyard 
+
+Install Halyard, which is used to install and manage spinnaker 
+
+[source,bash]
+----
+# Download and configure Halyard
+curl -O https://raw.githubusercontent.com/spinnaker/halyard/master/install/debian/InstallHalyard.sh
+
+sudo useradd halyard
+
+sudo bash InstallHalyard.sh
+
+sudo update-halyard
+
+# Verify the installation
+hal -v
+----
+
+== 2. Create the Amazon EKS cluster for Spinnaker
+
+----
+eksctl create cluster --name=k8scluster --nodes=2 --region=ca-central-1 --write-kubeconfig=false
+----
+ 
+== 3. Install and configure Spinnaker
+
+After kubernetes cluster creation login into local vm where halyard installed and check that you are able to connect to k8s cluster 
+
+Run aws configure to setup connectivity with your cluster
+
+----
+aws configure 
+provide aws access key and secret key
+----
+ 
+
+== 4. Retrieve Amazon EKS cluster kubectl contexts 
+
+----
+aws eks update-kubeconfig --name k8scluster --region ca-central-1 --alias eks-spinnaker
+
+# Enable the Kubernetes provider
+hal config provider kubernetes enable
+
+# Set the current kubectl context to the cluster for Spinnaker
+kubectl config use-context eks-spinnaker
+
+# Assign the Kubernetes context to CONTEXT
+CONTEXT=$(kubectl config current-context)
+
+kubectl apply --context $CONTEXT -f service-account.yml
+
+----
+
+----
+#sa.yml
+
+ 
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: spinnaker-role
+rules:
+  - apiGroups: ['']
+    resources:
+      [
+        'namespaces',
+        'configmaps',
+        'events',
+        'replicationcontrollers',
+        'serviceaccounts',
+        'pods/log',
+      ]
+    verbs: ['get', 'list']
+  - apiGroups: ['']
+    resources: ['pods', 'services', 'secrets']
+    verbs:
+      [
+        'create',
+        'delete',
+        'deletecollection',
+        'get',
+        'list',
+        'patch',
+        'update',
+        'watch',
+      ]
+  - apiGroups: ['autoscaling']
+    resources: ['horizontalpodautoscalers']
+    verbs: ['list', 'get']
+  - apiGroups: ['apps']
+    resources: ['controllerrevisions']
+    verbs: ['list']
+  - apiGroups: ['extensions', 'apps']
+    resources: ['daemonsets', 'deployments', 'deployments/scale', 'ingresses', 'replicasets', 'statefulsets']
+    verbs:
+      [
+        'create',
+        'delete',
+        'deletecollection',
+        'get',
+        'list',
+        'patch',
+        'update',
+        'watch',
+      ]
+  # These permissions are necessary for halyard to operate. We use this role also to deploy Spinnaker itself.
+  - apiGroups: ['']
+    resources: ['services/proxy', 'pods/portforward']
+    verbs:
+      [
+        'create',
+        'delete',
+        'deletecollection',
+        'get',
+        'list',
+        'patch',
+        'update',
+        'watch',
+      ]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spinnaker-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: spinnaker-role
+subjects:
+  - namespace: spinnaker
+    kind: ServiceAccount
+    name: spinnaker-service-account
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spinnaker-service-account
+  namespace: spinnaker
+
+----
+
+== 6. Extract the secret token of the created spinnaker-service-account:
+
+----
+TOKEN=$(kubectl get secret --context $CONTEXT \
+   $(kubectl get serviceaccount spinnaker-service-account \
+       --context $CONTEXT \
+       -n spinnaker \
+       -o jsonpath='{.secrets[0].name}') \
+   -n spinnaker \
+   -o jsonpath='{.data.token}' | base64 --decode)
+
+
+Set the user entry in kubeconfig:
+
+kubectl config set-credentials ${CONTEXT}-token-user --token $TOKEN
+
+kubectl config set-context $CONTEXT --user ${CONTEXT}-token-user
+
+Add eks-spinnaker cluster as a Kubernetes provider:
+
+hal config provider kubernetes account add eks-spinnaker --context $CONTEXT
+
+== 7. Enable artifact support and configure env to install spinnaker
+
+----
+hal config features edit --artifacts true
+
+hal config deploy edit --type distributed --account-name eks-spinnaker
+
+----
+
+== 8. Configure Spinnaker to use AWS S3 
+
+You will need your AWS account access key and secret access key.
+
+----
+
+export YOUR_ACCESS_KEY_ID=<access-key>
+
+hal config storage s3 edit --access-key-id $YOUR_ACCESS_KEY_ID \
+   --secret-access-key --region us-west-2
+
+Enter your AWS account secret access key at the prompt.
+Then, set the storage source to S3:
+
+hal config storage edit --type s3
+----
+
+== 9. Choose the Spinnaker version
+
+----
+hal version list
+
+export VERSION=1.19.2
+
+hal config version edit --version $VERSION
+
+Now, we are finally ready to install Spinnaker on the eks-spinnaker Amazon EKS cluster:
+
+hal deploy apply
+----
+
+== 10. Verify the Spinnaker installation
+
+----
+kubectl -n spinnaker get svc
+
+Expose Spinnaker using Elastic Load Balancer
+
+Expose the Spinnaker API (Gate) and the Spinnaker UI (Deck) using Load Balancers by running the following commands to create the spin-gate-public and spin-deck-public services:
+
+export NAMESPACE=spinnaker
+# Expose Gate and Deck
+kubectl -n ${NAMESPACE} expose service spin-gate --type LoadBalancer \
+  --port 80 --target-port 8084 --name spin-gate-public
+
+kubectl -n ${NAMESPACE} expose service spin-deck --type LoadBalancer \
+  --port 80 --target-port 9000 --name spin-deck-public
+
+export API_URL=$(kubectl -n $NAMESPACE get svc spin-gate-public \
+ -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+export UI_URL=$(kubectl -n $NAMESPACE get svc spin-deck-public \
+ -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+# Configure the URL for Gate
+hal config security api edit --override-base-url http://${API_URL}
+
+# Configure the URL for Deck
+hal config security ui edit --override-base-url http://${UI_URL}
+
+# Apply your changes to Spinnaker
+
+hal deploy apply
+
+It can take several moments for Spinnaker to restart.
+
+You can verify that the Spinnaker Pods have restarted and check their status:
+
+kubectl -n spinnaker get pods
+----
+
+== 11. Re-verify the Spinnaker installation
+Run the following command to verify that the Spinnaker services are present in the cluster:
+
+kubectl -n spinnaker get svc
+
+== 12. Log in to Spinnaker console
+
+Get the URL to Deck, the UI.
+
+----
+kubectl -n $NAMESPACE get svc spin-deck-public -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+----
+
+Navigate to the URL in a supported browser and log in.
+
+
+== References
+
+----
+https://spinnaker.io/docs/setup/install/providers/kubernetes-v2/aws-eks/
+
+https://spinnaker.io/docs/reference/architecture/microservices-overview/
+----
+
